@@ -58,6 +58,7 @@ type serviceTypes struct {
 
 type generator struct {
 	cfg            config
+	NameSpace      string
 	service        map[string]serviceTypes
 	runningService map[string]bool
 	enableService  map[string]bool
@@ -77,6 +78,16 @@ func (g *generator) init() {
 	pwd, _ := os.Getwd()
 	g.service = g.walkMeshDir(pwd)
 	g.enableService = g.getEnableServices()
+
+	ns, _ := g.cfg.Vars["namespace"]
+	if ns == "" {
+		ns, _, _ = g.commandExecute("whoami", "/")
+	}
+	if ns == "" {
+		log.fault("get user name failed")
+	}
+
+	g.NameSpace = ns
 }
 
 func (g *generator) run() {
@@ -249,8 +260,8 @@ func (g *generator) commandExecute(cmd string, workPath string) (string, string,
 }
 
 func (g *generator) preClean() {
-	os.Remove("output")
-	os.Mkdir("output", os.ModePerm)
+	os.Remove(g.cfg.OutputPath)
+	os.Mkdir(g.cfg.OutputPath, os.ModePerm)
 }
 
 func (g *generator) cmdPrint(sn, cmd, stdout, stderr string) {
@@ -342,6 +353,18 @@ func (g *generator) reload() {
 }
 
 func (g *generator) restart() {
+}
+
+func (g *generator) stopAll() {
+	format := "kubectl -n %s delete po,svc,configmap,vs,dr --all"
+	cmd := fmt.Sprintf(format, g.NameSpace)
+	g.commandExecute(cmd, "/")
+}
+
+func (g *generator) statusAll() {
+	format := "kubectl get po,svc,configmap,vs,dr -n %s"
+	cmd := fmt.Sprintf(format, g.NameSpace)
+	g.commandExecute(cmd, "/")
 }
 
 func (g *generator) walkMeshDir(path string) map[string]serviceTypes {
@@ -479,9 +502,17 @@ func existFile(name string) bool {
 	return true
 }
 
-func main() {
+func flagParse() {
 	flag.StringVar(&envFile, "env", "envfile", "env file")
 	flag.Parse()
+
+	if envFile == "" {
+		log.fault("envfile is null")
+	}
+}
+
+func main() {
+	flagParse()
 
 	cfg, err := parseConfig(envFile)
 	if err != nil {
@@ -489,8 +520,60 @@ func main() {
 		errExit()
 	}
 
+	args := flag.Args()
 	gen := newGenerator(cfg)
 	gen.init()
-	gen.run()
+
+	if len(args) == 0 {
+		gen.run()
+		return
+	}
+
+	if len(args) == 1 {
+		oneCommand(gen, args...)
+		return
+	}
+
+	if len(args) > 1 {
+		multiCommand(gen, args...)
+		return
+	}
+}
+
+func oneCommand(gen *generator, args ...string) {
+	op := args[0]
+
+	switch op {
+	case "start":
+		gen.run()
+
+	case "stop":
+		gen.stopAll()
+
+	case "restart":
+		gen.stopAll()
+		gen.run()
+
+	case "ps", "status":
+		gen.statusAll()
+
+	case "pull":
+		log.info("auto pull new image")
+
+	default:
+		log.fault("invalid args")
+	}
+}
+
+func multiCommand(gen *generator, args ...string) {
+	op := args[0]
+
+	switch op {
+	case "start":
+		// 1. get service or service_group
+	case "logs":
+		// 1. pipe
+		// 2. listen signal
+	}
 }
 
