@@ -1,0 +1,35 @@
+
+output_path: ./output
+
+vars:
+  run_env: TEST # PROD, DEV
+  benvoy_hostnet: false
+  namespace: ruifengyun
+  stat_addr: monitor:20090
+  std_level: verbose
+
+skip_inject_service:
+
+service:
+  - proxy
+  - backend
+  - cache
+
+must_deps:
+
+high_priority_deps:
+
+mid_priority_deps:
+
+low_priority_deps:
+
+service_group:
+  biz:
+  push:
+  im:
+
+disable:
+
+enable:
+  service:
+  service_group:

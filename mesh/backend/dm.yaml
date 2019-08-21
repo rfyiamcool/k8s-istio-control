@@ -1,0 +1,30 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .namespace }}
+  labels:
+    app: backend
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: docker.biss.com/bts/backend
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8090
+        env:
+          - name: config
+            valueFrom:
+              configMapKeyRef:
+                name: backend
+                key: biss

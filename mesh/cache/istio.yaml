@@ -1,0 +1,14 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: cache
+  namespace: {{ .namespace }}
+
+spec:
+  hosts:
+  - cache
+  http:
+  - route:
+    - destination:
+        host: cache
+      weight: 100

@@ -1,0 +1,30 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: proxy
+  namespace: {{ .namespace }}
+  labels:
+    app: proxy
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxy
+  template:
+    metadata:
+      labels:
+        app: proxy
+    spec:
+      containers:
+      - name: proxy
+        image: docker.biss.com/bts/proxy
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8090
+        env:
+          - name: config
+            valueFrom:
+              configMapKeyRef:
+                name: proxy
+                key: biss

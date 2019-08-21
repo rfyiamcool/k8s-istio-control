@@ -8,10 +8,28 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v2"
+)
+
+const (
+	FLAG_ENABLE  = "enabled"
+	FLAG_DISABLE = "disabled"
+	FLAG_STATUS  = "status"
+
+	KIND_DEPLOYMENT = "deployment"
+	KIND_DAEMONSET  = "daemonsets"
+	KIND_SERVICE    = "service"
+	KIND_POD        = "pod"
+	KIND_VS         = "vs"
+	KIND_DR         = "dr"
+	KIND_CONFIGMAP  = "configmap"
+
+	OP_SERV_RUN = iota
+	OP_SERV_GENERATE
 )
 
 var (
@@ -23,16 +41,26 @@ var (
 	}
 
 	envFile string
+
+	defaultWorkingPath, _ = os.Getwd()
+	meshWorkingPath       = filepath.Join(defaultWorkingPath, "mesh")
+
+	kindMap = map[string]bool{
+		KIND_DEPLOYMENT: true,
+		KIND_DAEMONSET:  true,
+		KIND_SERVICE:    true,
+		KIND_POD:        true,
+		KIND_VS:         true,
+		KIND_DR:         true,
+		KIND_CONFIGMAP:  true,
+	}
 )
 
-const (
-	FLAG_ENABLE  = "enabled"
-	FLAG_DISABLE = "disabled"
-	FLAG_STATUS  = "status"
-
-	OP_SERV_RUN = iota
-	OP_SERV_GENERATE
-)
+func init() {
+	if !existFile("mesh") || !existFile("deps") {
+		log.fault("please run control scripts in deploy top path")
+	}
+}
 
 type config struct {
 	OutputPath        string              `yaml:"output_path"`
@@ -82,9 +110,7 @@ func newGenerator(cfg config) *generator {
 }
 
 func (g *generator) init() {
-	pwd, _ := os.Getwd()
-	g.service = g.walkMeshDir(pwd)
-
+	g.service = g.walkMeshDir(meshWorkingPath)
 	g.enableService = g.sortPriorityService(
 		g.fillMustDeps(
 			g.getEnableService(),
@@ -178,7 +204,6 @@ func (g *generator) handleRun(op int) {
 		}
 
 		g.servGenerateCfg(serv)
-
 		if op == OP_SERV_GENERATE {
 			continue
 		}
@@ -271,11 +296,10 @@ func (g *generator) getEnableService() []string {
 
 func (g *generator) syncDeps() {
 	var (
-		pwd, _ = os.Getwd()
-		cmd    = "bash sync.sh"
+		cmd = "bash sync.sh"
 	)
 
-	stdout, stderr, err := g.commandExecute(cmd, pwd)
+	stdout, stderr, err := g.commandExecute(cmd, meshWorkingPath)
 	if err != nil {
 		log.error("bash sync.sh failed in prepare, stdout: %s, stderr: %s, err: %s",
 			stdout,
@@ -295,7 +319,7 @@ func (g *generator) servGenerateCfg(serv serviceTypes) {
 			continue
 		}
 
-		rfile := serv.sname + "/" + tp
+		rfile := filepath.Join(meshWorkingPath, serv.sname, tp)
 		if !existFile(rfile) {
 			log.fault("%s not found", rfile)
 			errExit()
@@ -314,16 +338,18 @@ func (g *generator) servGenerateCfg(serv serviceTypes) {
 			errExit()
 		}
 
-		os.Mkdir(g.cfg.OutputPath+"/"+serv.sname, os.ModePerm)
-
 		// validate output config
 		if vres, valid := g.validateSyntax(doc.String()); !valid {
 			log.fault("validate cfg generated syntax failed, regexp: %s", vres)
 			errExit()
 		}
 
-		target := g.cfg.OutputPath + "/" + serv.sname + "/" + tp
-		g.output(target, doc.String())
+		// create dir, write target
+		targetDir := filepath.Join(g.cfg.OutputPath, serv.sname)
+		os.Mkdir(targetDir, os.ModePerm) // ignore created already
+
+		targetFile := filepath.Join(g.cfg.OutputPath, serv.sname, tp)
+		g.output(targetFile, doc.String())
 	}
 }
 
@@ -429,16 +455,15 @@ func (g *generator) iterateStart() {
 
 func (g *generator) servStart(sn string) {
 	var (
-		pwd, _         = os.Getwd()
-		workPath       = pwd + "/" + g.cfg.OutputPath + "/" + sn
+		workPath       = filepath.Join(g.cfg.OutputPath, sn)
 		stdout, stderr string
 		err            error
 	)
 
 	// disable istio inject; first disable, after enable
 	if isExistInList(sn, g.cfg.SkipInjectService) {
-		g.controlIstioInject(FLAG_DISABLE, pwd)
-		defer g.controlIstioInject(FLAG_ENABLE, pwd)
+		g.controlIstioInject(FLAG_DISABLE, defaultWorkingPath)
+		defer g.controlIstioInject(FLAG_ENABLE, defaultWorkingPath)
 	}
 
 	serv := g.service[sn]
@@ -482,21 +507,79 @@ func (g *generator) restart() {
 }
 
 func (g *generator) stopAll() {
-	format := "kubectl -n %s delete daemonsets,deployment,po,svc,configmap,vs,dr --all --force --grace-period=0"
-	cmd := fmt.Sprintf(format, g.NameSpace)
-	stdout, _, _ := g.commandExecute(cmd, "/")
-	log.info(stdout)
+	var (
+		cmd    string
+		stdout string
+		stderr string
+	)
 
-	// cmd = fmt.Sprintf("kubectl delete namespace %s", g.NameSpace)
-	// stdout, _, _ = g.commandExecute(cmd, "/")
-	// log.info(stdout)
+	kinds := []string{
+		"deployment",
+		"daemonsets",
+		"pods",
+		"service",
+		"configmap",
+		"vs",
+		"dr",
+	}
+
+	forceFormat := "kubectl -n %s delete %s --all --force --grace-period=0"
+	format := "kubectl -n %s delete %s --all"
+
+	for _, kind := range kinds {
+		switch kind {
+		case "deployment", "daemonsets", "pods":
+			cmd = fmt.Sprintf(forceFormat, g.NameSpace, kind)
+		default:
+			cmd = fmt.Sprintf(format, g.NameSpace, kind)
+		}
+
+		stdout, stderr, _ = g.commandExecute(cmd, "/")
+		log.color(green, "delete namespace %s %s", g.NameSpace, kind)
+		log.info("stop result, stdout: %s, stderr: %s", stdout, log.nullStdout(stderr))
+	}
+
+	if g.NameSpace != "default" && g.NameSpace != "" {
+		cmd = fmt.Sprintf("kubectl delete namespace %s", g.NameSpace)
+		stdout, _, _ = g.commandExecute(cmd, "/")
+		log.info(stdout)
+	}
 }
 
 func (g *generator) statusAll() {
-	format := "kubectl -n %s get pods,svc,configmap,vs,dr,daemonsets"
-	cmd := fmt.Sprintf(format, g.NameSpace)
+	for kind, _ := range kindMap {
+		g.status(kind)
+	}
+}
+
+func (g *generator) status(kind string) {
+	cmd := fmt.Sprintf("kubectl -n %s get %s",
+		g.NameSpace,
+		kind,
+	)
 	stdout, _, _ := g.commandExecute(cmd, "/")
-	log.info(stdout)
+	log.color(yellow, "show %s status:", kind)
+	log.info(stdout + "\n")
+}
+
+func (g *generator) getNodePort() {
+	cmd := fmt.Sprintf("kubectl -n %s get services",
+		g.NameSpace,
+	)
+	stdout, _, _ := g.commandExecute(cmd, "/")
+	lines := strings.Split(stdout, "\n")
+	for idx, line := range lines {
+		if idx == 0 {
+			log.color(yellow, "%s \n", line)
+			continue
+		}
+
+		if !strings.Contains(line, " NodePort ") {
+			continue
+		}
+
+		log.info("%s", line)
+	}
 }
 
 func (g *generator) walkMeshDir(path string) map[string]serviceTypes {
@@ -505,8 +588,10 @@ func (g *generator) walkMeshDir(path string) map[string]serviceTypes {
 	)
 
 	for _, servName := range g.cfg.Service {
-		if !existFile(servName) {
-			log.fault("service %s dir not found", servName)
+		if !existFile(filepath.Join(path, servName)) {
+			log.fault("service %s dir not found, current_path: %s",
+				servName, path,
+			)
 		}
 
 		serv := g.walkSubDir(servName)
@@ -516,13 +601,16 @@ func (g *generator) walkMeshDir(path string) map[string]serviceTypes {
 	return fs
 }
 
-func (g *generator) walkSubDir(path string) serviceTypes {
+func (g *generator) walkSubDir(sn string) serviceTypes {
 	var (
 		sd = serviceTypes{}
 	)
 
-	sd.sname = path
-	files, _ := ioutil.ReadDir(path)
+	sd.sname = sn
+	files, _ := ioutil.ReadDir(filepath.Join(meshWorkingPath, sn))
+	if len(files) == 0 {
+		log.error("service %s dir not contains *.yaml ?", sn)
+	}
 	for _, fi := range files {
 		if fi.IsDir() {
 			continue
@@ -614,6 +702,13 @@ const (
 
 type logger struct{}
 
+func (l *logger) nullStdout(stderr string) string {
+	if stderr == "" {
+		return "nil"
+	}
+	return stderr
+}
+
 func (l *logger) info(format string, args ...interface{}) {
 	v := fmt.Sprintf(format, args...)
 	fmt.Println(v)
@@ -673,11 +768,19 @@ func isArrayRepeat(sl []string) (string, bool) {
 }
 
 func flagParse() {
-	flag.StringVar(&envFile, "env", "envfile", "env file")
+	flag.StringVar(&envFile, "env", "", "env file")
 	flag.Parse()
 
-	if envFile == "" {
-		log.fault("envfile is null")
+	runEnv := os.Getenv("RUN_ENV")
+	log.color(blue, "RUN_ENV: %s", runEnv)
+
+	if envFile == "" && runEnv != "PROD" {
+		envFile = "etc/test_env.yaml"
+		log.info("envfile is null, reset load %s", envFile)
+	}
+
+	if envFile == "" && runEnv == "PROD" {
+		log.fault("PROD must need input env file")
 	}
 }
 
@@ -701,8 +804,18 @@ func oneCommand(gen *generator, args ...string) {
 	case "ps", "status":
 		gen.statusAll()
 
+	case "pods", "pod":
+		gen.status(KIND_POD)
+
+	case "service", "services", "svc":
+		gen.status(KIND_SERVICE)
+
 	case "pull":
 		log.info("auto pull new image")
+
+	case "port":
+		log.info("show benvoy nodeport")
+		gen.getNodePort()
 
 	default:
 		log.fault("invalid args")

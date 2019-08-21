@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy
+  namespace: {{ .namespace }}
+data:
+  biss: |
+    stat:
+      addr: {{ .stat_addr }}
+    log:
+      std:
+        level: {{ .std_level }}

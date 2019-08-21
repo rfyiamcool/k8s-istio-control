@@ -1,0 +1,30 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: {{ .namespace }}
+  labels:
+    app: cache
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+      - name: cache
+        image: docker.biss.com/bts/cache
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8090
+        env:
+          - name: config
+            valueFrom:
+              configMapKeyRef:
+                name: cache
+                key: biss
