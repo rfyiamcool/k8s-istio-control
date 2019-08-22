@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -40,7 +42,10 @@ var (
 		"etc",
 	}
 
-	envFile string
+	envFile    string
+	logTailNum int
+	logSince   string
+	help       bool
 
 	defaultWorkingPath, _ = os.Getwd()
 	meshWorkingPath       = filepath.Join(defaultWorkingPath, "mesh")
@@ -408,6 +413,34 @@ func (g *generator) commandExecute(cmd string, workPath string) (string, string,
 	return string(stdout.Bytes()), string(stderr.Bytes()), err
 }
 
+func (g *generator) commandExecutePipe(cmd string) error {
+	runner := exec.Command("bash", "-c", cmd)
+	stdout, err := runner.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	runner.Start()
+	reader := bufio.NewReader(stdout)
+	for {
+		line, _, err := reader.ReadLine()
+		if err != nil || io.EOF == err {
+			break
+		}
+
+		lower := strings.ToLower(string(line))
+		if strings.Contains(lower, "error") {
+			log.error("%s", line)
+			continue
+		}
+
+		log.info("%s", line)
+	}
+
+	runner.Wait()
+	return nil
+}
+
 func (g *generator) preClean() {
 	os.Remove(g.cfg.OutputPath)
 	os.Mkdir(g.cfg.OutputPath, os.ModePerm)
@@ -562,6 +595,25 @@ func (g *generator) status(kind string) {
 	log.info(stdout + "\n")
 }
 
+func (g *generator) getPodsName(sn string) []string {
+	cmd := fmt.Sprintf("kubectl -n %s get pods",
+		g.NameSpace,
+	)
+	stdout, _, _ := g.commandExecute(cmd, "/")
+	lines := strings.Split(stdout, "\n")
+
+	pods := []string{}
+	for _, line := range lines {
+		// optimize pod random name code
+		if !strings.HasPrefix(line, sn) {
+			continue
+		}
+
+		pods = append(pods, sn)
+	}
+	return pods
+}
+
 func (g *generator) getNodePort() {
 	cmd := fmt.Sprintf("kubectl -n %s get services",
 		g.NameSpace,
@@ -580,6 +632,23 @@ func (g *generator) getNodePort() {
 
 		log.info("%s", line)
 	}
+}
+
+func (g *generator) logTail(sn string) {
+	pods := g.getPodsName(sn)
+	if len(pods) == 0 {
+		log.error("not found service %s pods", sn)
+		return
+	}
+
+	podName := pods[0]
+	cmd := fmt.Sprintf("kubectl -n %s logs %s -c %s --tail=%d -f",
+		g.NameSpace,
+		podName,
+		sn,
+		logTailNum,
+	)
+	g.commandExecutePipe(cmd)
 }
 
 func (g *generator) walkMeshDir(path string) map[string]serviceTypes {
@@ -767,9 +836,67 @@ func isArrayRepeat(sl []string) (string, bool) {
 	return "", false
 }
 
+func printUsage() {
+	fmt.Fprintf(os.Stdout, `
+Usage of ./control [ option ] [ cmd args... ]:
+
+[option]:
+-env string
+	env file
+	(default: {pwd}/etc/test_env.yaml)
+-tail int
+	lines of recent log file to display
+	(default: 150)
+-since string
+	only return logs newer than a relative duration like 5s, 2m, or 3h.
+-h bool
+	show help
+
+
+[cmd argv]: (for all k8s resource)
+# start all resource
+./control start
+
+# stop all resource
+./control stop
+
+# query all resource
+./control status
+
+# generate config by template and env
+./control gen
+
+# query nodePort
+./control port
+
+# query k8s service list
+./control service
+
+# query k8s pod list
+./control pod
+
+
+[cmd argv ...]:
+./control log {service name}
+./control start {service name}
+./control stop {service name}
+./control reload {service name}
+
+`)
+
+}
+
 func flagParse() {
 	flag.StringVar(&envFile, "env", "", "env file")
+	flag.BoolVar(&help, "h", false, "show help")
+	flag.IntVar(&logTailNum, "tail", 150, "log tail num")
+	flag.StringVar(&logSince, "since", "", "log since")
 	flag.Parse()
+
+	if help {
+		printUsage()
+		os.Exit(0)
+	}
 
 	runEnv := os.Getenv("RUN_ENV")
 	log.color(blue, "RUN_ENV: %s", runEnv)
@@ -824,13 +951,13 @@ func oneCommand(gen *generator, args ...string) {
 
 func multiCommand(gen *generator, args ...string) {
 	op := args[0]
+	sn := args[1]
 
 	switch op {
 	case "start":
-		// 1. get service or service_group
-	case "logs":
-		// 1. pipe
-		// 2. listen signal
+	case "stop":
+	case "logs", "log":
+		gen.logTail(sn)
 	}
 }
 
@@ -846,11 +973,6 @@ func main() {
 	args := flag.Args()
 	gen := newGenerator(cfg)
 	gen.init()
-
-	if len(args) == 0 {
-		gen.run()
-		return
-	}
 
 	if len(args) == 1 {
 		oneCommand(gen, args...)
